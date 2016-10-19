@@ -1,27 +1,35 @@
-OM10
-====
+# OM10
+
+<a href='https://travis-ci.org/drphilmarshall/OM10'>
+<img src='https://secure.travis-ci.org/drphilmarshall/OM10.png?branch=master'></a>
 
 Tools for working with the Oguri &amp; Marshall (2010) mock catalog of strong gravitational lenses
 
-### Getting started
+### Installing OM10
+```
+pip install om10
+```
 
-Edit the following lines and add them to your `.login` file:
+### Developing OM10
+
+Fork the repo and clone it to your local machine. Then,
+edit the following lines and add them to your `.login` file:
 
     setenv OM10_DIR ${WORK_DIR}/OM10
     setenv PYTHONPATH ${OM10_DIR}:${PYTHONPATH}
 
-Now you can just:
+Now when you `import om10` you'll get the development version, linked to to your fork. 
+Make sure you have all the requirements with
+```
+pip install -r requirements.txt
+```
 
-    import om10
-    
-You'll need `pyfits` and `matplotlib` too.
-
-### Example use
+### Example Use
 
 Read in the master FITS catalog and look up one system:    
-        
+
     db = om10.DB(catalog="data/qso_mock.fits")
-    
+
     id = 7176527
     lens = db.get_lens(id)
 
@@ -33,13 +41,12 @@ Select a mock LSST sample:
 
     lenses = db.select_random(maglim=23.3,area=20000.0,IQ=0.7)
 
+
 ### License, Credits
 
-This code is distributed under GPL v2, and is being developed by Marshall 
-(KIPAC), Sonnenfeld (UCSB), Liao (UCSB) and Agnello (UCSB).
+This code is distributed under the MIT license, and is being developed sporadically by Marshall and Baumer (KIPAC), Liao (UCLA) and Agnello (UCLA). If you'd like to help out, please send us an [issue](https://github.com/drphilmarshall/OM10/issues)!
 
-If you use the OM10 mock lens catalog in your research, please cite [Oguri &amp; Marshall
-(2010)](http://adsabs.harvard.edu/abs/2010MNRAS.405.2579O). Here's the bibtex for you!
+If you use the OM10 mock lens catalog in your research, please cite [Oguri &amp; Marshall (2010)](http://adsabs.harvard.edu/abs/2010MNRAS.405.2579O). Here's the bibtex for you!
 
     @OM10,
        author = {{Oguri}, M. and {Marshall}, P.~J.},
