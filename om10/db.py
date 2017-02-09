@@ -10,9 +10,10 @@ import astropy.io.fits as pyfits
 from sklearn.neighbors import NearestNeighbors
 from sklearn import preprocessing
 
-import om10
+from lenspop import population_functions, distances
+from stellarpop import tools
 
-vb = True
+import om10
 
 # ======================================================================
 
@@ -28,31 +29,47 @@ class DB(object):
 
     Notes
     -----
-      This file is part of the OM10 project, distributed under the
-      MIT License by Phil Marshall (KIPAC).
-      Please cite: Oguri & Marshall (2010), MNRAS, 405, 2579.
     """
     # ------------------------------------------------------------------
 
-    def __init__(self,catalog=None,generate=False):
+    def __init__(self, catalog=None, generate=False, vb=True):
 
         self.name = 'OM10 database'
+        self.vb = vb
+
         if catalog is None:
-            self.download()
+            # Use the one that comes with the package:
+            self.catalog = \
+                os.path.join(os.path.dirname(os.path.realpath(__file__)), '../data/qso_mock.fits')
         else:
             self.catalog = os.path.expandvars(catalog)
 
+        self.setup()
+
+        return
+
+    # ------------------------------------------------------------------
+
+    def setup(self):
+        """
+        Read in the catalog and set up an initial (super) sample.
+        """
         # Read in the catalog:
-        self.lenses = Table.read(self.catalog,format='fits')
+        self.lenses = Table.read(self.catalog, format='fits')
+        if self.vb:
+            print "OM10: Full db.lenses table contains {:d} systems".format(len(self.lenses))
 
         # No down-sampling has been done yet, but all methods operate
         # on a "sample" - so make a copy:
         self.sample = self.lenses.copy()
+        self.Nlenses = len(self.sample)
+        if self.vb:
+            print "OM10: Initial db.sample contains {:d} systems".format(self.Nlenses)
 
-        # Count lenses:
-        try: self.Nlenses = len(self.lenses['LENSID'])
-        except: self.Nlenses = 0
+        return
 
+    def reset(self):
+        self.setup()
         return
 
     # ------------------------------------------------------------------
@@ -60,13 +77,21 @@ class DB(object):
     def download(self):
         """
         Downloads a copy of the primary OM10 FITS table.
+
+        Notes
+        -----
+        This could be useful, in case the one that came with the
+        package gets deleted, or you just want a local copy. The new
+        catalog will be placed in the current working directory, and the filename (stored in `db.catalog`) updated.
         """
         url = 'https://github.com/drphilmarshall/OM10/raw/master/data/qso_mock.fits'
         self.catalog = url.split('/')[-1]
-        print "Looking for catalog ", self.catalog
+        if self.vb: print "OM10: Looking for local catalog {:s}".format(self.catalog)
         if not os.path.isfile(self.catalog):
             urllib.urlretrieve(url, self.catalog)
-            print 'Downloaded catalog:', self.catalog
+            if self.vb: print 'OM10: Downloaded catalog: {:s}'.format(self.catalog)
+        else:
+            if self.vb: print 'OM10: File already exists, no need to download.'
         return
 
     # ------------------------------------------------------------------
@@ -78,9 +103,7 @@ class DB(object):
             pyfits.writeto(catalog,self.lenses)
         else:
             pyfits.writeto(catalog,self.sample)
-        if vb:
-            print "om10.DB: wrote catalog of ", self.Nlenses,
-            " OM10 lenses to file at " + catalog
+        if self.vb: print "OM10: Wrote catalog of {:d} OM10 lenses to file at {:s}".format(self.Nlenses, catalog)
         return
 
     # ------------------------------------------------------------------
@@ -90,35 +113,60 @@ class DB(object):
         try: rec = self.lenses[self.lenses['LENSID'] == ID]
         except: rec = None
 
+        if self.vb:
+            print "OM10: Extracted OM10 lens number {:d}:".format(ID)
+            print rec
+
         return rec
 
     # ------------------------------------------------------------------
 
-    def select_random(self,Nlens=None,maglim=99.0,area=100000.0,IQ=0.0):
+    def select_random(self, Nlens=None, maglim=99.0, area=100000.0,
+                      IQ=0.0):
+        """
+        Selects an appropriately-sized random sample of lenses that
+        meet the rough observing criteria given.
 
-        # Select all lenses that meet the rough observing criteria:
+        Parameters
+        ----------
+        Nlens : int, optional
+            Specific desired number of lenses
+        maglim : float
+            10-sigma point source detection limit
+        area : float
+            Total survey area, in square degrees
+        IQ : float
+            Median survey image quality, in arcsec
+
+        Notes
+        -----
+        If `Nlens` is not specified, it is calculated based on the OM10
+        model. The full OM10 catalog contains 100,000 sq degrees worth
+        of lenses. The detection criteria assumed are given in the OM10
+        paper: we assume that the 3rd brightest quasar image must be
+        brighter than the given `maglim`, and the image separation must
+        be greater than 0.67 times the given `IQ`.
+        """
 
         try:
             sample = self.sample.copy()
             sample = sample[sample['MAGI'] < maglim]
             sample = sample[sample['IMSEP'] > 0.67*IQ]
         except:
-            if vb: print "om10.DB: selection yields no lenses"
+            if self.vb: print "OM10: Selection yields no lenses"
             return None
 
         # Compute expected number of lenses in survey:
-
         if Nlens is None:
             N = int(len(sample) * (area / 20000.0) * 0.2)
         else:
             N = Nlens
-        if vb: print "om10.DB: selection yields ",N," lenses"
+        if self.vb: print "OM10: selection yields {:d} lenses".format(N)
         if N > len(sample):
-            print "om10.db: Warning: too few lenses in catalog, returning ",len(sample)," instead"
+            print "OM10: Warning: too few lenses in catalog, returning {:d} instead".format(len(sample))
             N = len(sample)
 
         # Shuffle sample and return only this, or the required, number of systems:
-
         index = range(len(sample))
         np.random.shuffle(index)
         index = index[0:N]
@@ -130,14 +178,15 @@ class DB(object):
 
     # ------------------------------------------------------------------
 
-    def get_sky_positions(self,dmag=0.2,dz=0.2,input_cat='$OM10_DIR/data/CFHTLS_LRGs.txt'):
+    def get_sky_positions(self, dmag=0.2, dz=0.2,
+                          input_cat='$OM10_DIR/data/CFHTLS_LRGs.txt'):
 
         LRGfile = os.path.expandvars(input_cat)
         try:
             d = np.loadtxt(LRGfile)
         except IOError:
             print "Cannot find LRG catalog!"
-        if vb: print "om10.DB: read in LRG sky position data from ",LRGfile
+        if self.vb: print "OM10: read in LRG sky position data from {:s}".format(LRGfile)
 
         # Put LRG parameters in LRG structure:
         # RA DEC z mag_u mag_g mag_r mag_i mag_z
@@ -158,7 +207,7 @@ class DB(object):
         print "Mean LRG RA,DEC,z = ",np.average(self.LRGs['RA']),np.average(self.LRGs['DEC']),np.average(self.LRGs['redshift']),np.average(self.LRGs['mag_i']);
         print "Mean LRG i,(g-r) = ",np.average(self.LRGs['RA']),np.average(self.LRGs['DEC']),np.average(self.LRGs['redshift']),np.average(self.LRGs['mag_i']);
 
-        if vb: print "om10.DB: number of LRGs stored = ",len(self.LRGs['redshift'])
+        if self.vb: print "om10.DB: number of LRGs stored = ",len(self.LRGs['redshift'])
 
         return
 
@@ -218,53 +267,115 @@ class DB(object):
                                     lens['MAGZ_SRC']-mag_adjust[img])
                 out_idx += 1
         return sim_cat
-
+    
 # ----------------------------------------------------------------------------
 
-    def paint(self,Nmax=None,verbose=False,lrg_input_cat='$OM10_DIR/data/LRGo.txt',qso_input_cat='$OM10_DIR/data/QSOo.txt'):
+    # The paint method became really long, so needed to decompose this part out
+    def calculateRestFrameRMag(self, sed, veldisp, redshift, d):
+	# call constructor. Name should be changed
+	lenspop_const = population_functions.LensPopulation_()
+	# Reference Frame Absolute R magnitude
+	RF_RMag_abs, _ = lenspop_const.EarlyTypeRelations(veldisp)
+	Rfilter = tools.filterfromfile('r_SDSS')
+	RMag_abs = tools.ABFilterMagnitude(Rfilter, sed, redshift)
+	Rmag_app = RMag_abs + d.distance_modulus(redshift)
+	offset_abs_app = RMag_abs - Rmag_app
+	offset_RF_abs = RF_RMag_abs - RMag_abs
+	RF_Rmag_app = RF_RMag_abs - offset_abs_app
+	return RF_Rmag_app, offset_RF_ab
+
+# ----------------------------------------------------------------------------
+    
+    def paint(self,Nmax=None,verbose=False,lrg_input_cat='$OM10_DIR/data/LRGo.txt',qso_input_cat='$OM10_DIR/data/QSOo.txt', synthetic=False, target='lens'):
+        if synthetic==False:
         ## read data from SDSS
-        f=open(os.path.expandvars(lrg_input_cat),'r')
-        lrg=loadtxt(f)
-        f.close()
+            f=open(os.path.expandvars(lrg_input_cat),'r')
+            lrg=loadtxt(f)
+            f.close()
         #print lrg[0,0],lrg.shape
-        g=open(os.path.expandvars(qso_input_cat),'r')
-        qso=loadtxt(g)
-        g.close()
+            g=open(os.path.expandvars(qso_input_cat),'r')
+            qso=loadtxt(g)
+            g.close()
         #print qso[0,0],qso.shape
 
         ###MY OWN REDSHIFT ONLY MATCHING HERE:
 
-        lens_props = ['MAGG_LENS','MAGR_LENS','MAGI_LENS','MAGZ_LENS', \
-        'MAGW1_LENS','MAGW2_LENS','MAGW3_LENS','MAGW4_LENS', 'SDSS_FLAG_LENS']
+            lens_props = ['MAGG_LENS','MAGR_LENS','MAGI_LENS','MAGZ_LENS', \
+            'MAGW1_LENS','MAGW2_LENS','MAGW3_LENS','MAGW4_LENS', 'SDSS_FLAG_LENS']
+    
+            src_props = ['MAGG_SRC','MAGR_SRC','MAGI_SRC','MAGZ_SRC', \
+            'MAGW1_SRC','MAGW2_SRC','MAGW3_SRC','MAGW4_SRC', 'SDSS_FLAG_SRC']
+    
+            tmp_lens = Table(np.zeros((len(self.sample),len(lens_props)),dtype='f8'),names=lens_props)
+            tmp_src = Table(np.zeros((len(self.sample),len(src_props)),dtype='f8'),names=src_props)
+    
+            if verbose: print 'setup done'
+    
+            lrg_sort = lrg[np.argsort(lrg[:,0]),:]
+            qso_sort = qso[np.argsort(qso[:,0]),:]
+            lens_count = 0
+    
+            for lens in self.sample:
+    
+                #paint lens
+                ind = np.searchsorted(lrg_sort[:,0],lens['ZLENS'])
+                if ind >= len(lrg_sort): ind = len(lrg_sort) - 1
+                tmp_lens[lens_count] = lrg_sort[ind,6:] - lrg_sort[ind,8] + lens['APMAG_I'] #assign colors, not mags
+                #paint source
+                qso_ind = np.searchsorted(qso_sort[:,0],lens['ZSRC'])
+                if qso_ind >= len(qso_sort): qso_ind = len(qso_sort) - 1
+                tmp_src[lens_count] = qso_sort[qso_ind,1:] - qso_sort[qso_ind,3] + lens['MAGI']
+    
+                lens_count += 1
+    
+            self.sample = hstack([self.sample,tmp_lens,tmp_src])
 
-        src_props = ['MAGG_SRC','MAGR_SRC','MAGI_SRC','MAGZ_SRC', \
-        'MAGW1_SRC','MAGW2_SRC','MAGW3_SRC','MAGW4_SRC', 'SDSS_FLAG_SRC']
 
-        tmp_lens = Table(np.zeros((len(self.sample),len(lens_props)),dtype='f8'),names=lens_props)
-        tmp_src = Table(np.zeros((len(self.sample),len(src_props)),dtype='f8'),names=src_props)
-
-        if verbose: print 'setup done'
-
-        lrg_sort = lrg[np.argsort(lrg[:,0]),:]
-        qso_sort = qso[np.argsort(qso[:,0]),:]
-        lens_count = 0
-
-        for lens in self.sample:
-
-            #paint lens
-            ind = np.searchsorted(lrg_sort[:,0],lens['ZLENS'])
-            if ind >= len(lrg_sort): ind = len(lrg_sort) - 1
-            tmp_lens[lens_count] = lrg_sort[ind,6:] - lrg_sort[ind,8] + lens['APMAG_I'] -1.5 #assign colors, not mags #hack offset
-            #paint source
-            qso_ind = np.searchsorted(qso_sort[:,0],lens['ZSRC'])
-            if qso_ind >= len(qso_sort): qso_ind = len(qso_sort) - 1
-            tmp_src[lens_count] = qso_sort[qso_ind,1:] - qso_sort[qso_ind,3] + lens['MAGI']
-
-            lens_count += 1
-
-        self.sample = hstack([self.sample,tmp_lens,tmp_src])
-
+        if synthetic==True:
+            print 'here'
+            # call a distance class constructor
+            d = distances.Distance()
+            # number of data in the table of calculated magnitude
+            totalEntrees = self.Nlenses*4.0
+            t = Table(np.arange(totalEntrees).reshape(self.Nlenses, 4), names=('r_SDSS', 'g_SDSS', 'i_SDSS', 'z_SDSS'))
+ 	    lens_count = 0
+ 	    print 'here'
+ 	    Gfilter = tools.filterfromfile('g_SDSS')
+ 	    Ifilter = tools.filterfromfile('i_SDSS')
+ 	    Zfilter = tools.filterfromfile('z_SDSS')
+	    for lens in self.sample:
+                # assign constants according to the type of the object
+                if target == 'source':
+                    # if target is lens, use appropriate SED
+                    sed = tools.getSED('QSO1_template_norm')
+                    veldisp = source_veldisp
+                    redshift = source_redshift
+                elif target == 'lens':
+                    # if target is galaxy, use appropriate SED
+                    sed = tools.getSED('M82_template_norm')
+                    veldisp = lens['VELDISP']
+                    redshift = lens['ZLENS']
+	    	RF_Rmag_app, offset = self.calculateRestFrameRMag(sed, veldisp, redshift, d)
+                # getting filters and calculate magnitudes for each filter
+                Gfilter = tools.filterfromfile('g_SDSS')
+                Ifilter = tools.filterfromfile('i_SDSS')
+                Zfilter = tools.filterfromfile('z_SDSS')
+                RF_Gmag_app = tools.ABFilterMagnitude(Gfilter, sed, redshift) + offset + d.distance_modulus(redshift)
+                RF_Imag_app = tools.ABFilterMagnitude(Ifilter, sed, redshift) + offset + d.distance_modulus(redshift)
+                RF_Zmag_app = tools.ABFilterMagnitude(Zfilter, sed, redshift) + offset + d.distance_modulus(redshift)
+                # update the table with the magnitude
+                t['r_SDSS'][lens_count] = RF_Rmag_app
+                t['g_SDSS'][lens_count] = RF_Gmag_app
+                t['i_SDSS'][lens_count] = RF_Imag_app
+                t['z_SDSS'][lens_count] = RF_Zmag_app
+                lens_count = lens_count+1
+                print lens_count
+    	    # update the table by adding the table of calculated magnitude
+    	self.lenses.add_columns(t.columns.values())
+    
         return
+
+
 
 # ======================================================================
 
